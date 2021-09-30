@@ -17,7 +17,7 @@ contract StakingStorage {
         // no-scale
         uint lockupTerm;
         // 1e18 scale 
-        uint interestLimitAmount;
+        uint totalInterestLimitAmount;
         // 1e18 scale 
         // ex) 30% : 0.3 * 1e18
         uint interestRate;
@@ -52,6 +52,8 @@ contract StakingInterface is StakingStorage {
     event Redeem(address redeemer, uint redeemAmount);
     event RedeemPrincipal(address redeemer, uint redeemAmount);
     event UpdateStakingStandard(uint newLockupTerm, uint newLimitAmount, uint newInterestRate);
+    event UpdateController(Controller oldController, Controller newController);
+    event UpdateAdmin(address oldAdmin, address newAdmin);
 
     function mint(uint mintAmount) external returns (uint);
 

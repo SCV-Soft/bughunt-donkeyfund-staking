@@ -17,14 +17,18 @@ import "../common/upgradeable/Initializable.sol";
  */
 
 contract Staking is Initializable, StakingInterface, Exponential {
-    function initialize(address donkeyAddress_, uint lockupTerm_, uint interestLimitAmount_, uint interestRate_, Controller controller_) public initializer {
+    function initialize(address donkeyAddress_, uint lockupTerm_, uint totalInterestLimitAmount_, uint interestRate_, Controller controller_) public initializer {
+
+        require(controller_.isController());
+
         admin = msg.sender;
         donkeyAddress = donkeyAddress_;
         controller = controller_;
         
         stakingMetaData.lockupTerm = lockupTerm_;
-        stakingMetaData.interestLimitAmount = interestLimitAmount_;
+        stakingMetaData.totalInterestLimitAmount = totalInterestLimitAmount_;
         stakingMetaData.interestRate = interestRate_;
+
 
         _notEntered = true;
     }
@@ -48,14 +52,14 @@ contract Staking is Initializable, StakingInterface, Exponential {
 
         // totalExpectedInterest = (totalPrincipalAmount + mintAmount) * interestRate + totalPaidInterestAmount
         vars.totalExpectedInterest = add_(_expectedInterest(add_(stakingMetaData.totalPrincipalAmount, mintAmount)), stakingMetaData.totalPaidInterestAmount);
-        require(vars.totalExpectedInterest <= stakingMetaData.interestLimitAmount, "E103");
+        require(vars.totalExpectedInterest <= stakingMetaData.totalInterestLimitAmount, "E103");
 
         IERC20 donkey = IERC20(donkeyAddress);
         vars.donkeyBalance = donkey.balanceOf(vars.account);
 
         if (mintAmount > vars.donkeyBalance) {
-            // refers to https://github.com/donkey-fund/staking/blob/main/readme.md/#Notice
-            vars.claimResult = controller.claimDonkeyBehalfOf(vars.account);
+            // reference : https://github.com/donkey-fund/staking/blob/main/readme.md/#Notice
+            vars.claimResult = controller.claimDonkeyBehalfOf(vars.account, false);
             require(vars.claimResult, "E105");
             require(mintAmount <= currentTotalDonBalanceOf(vars.account), "E104");
         } 
@@ -70,6 +74,35 @@ contract Staking is Initializable, StakingInterface, Exponential {
         return vars.actualMintAmount;
     }
 
+    function mintMax() external nonReentrant returns (uint) {
+        MintLocalVars memory vars;
+        
+        vars.account = msg.sender;
+
+        // reference : https://github.com/donkey-fund/staking/blob/main/readme.md/#Notice
+        vars.claimResult = controller.claimDonkeyBehalfOf(vars.account, true);
+        require(vars.claimResult, "E105");
+
+        uint mintAmount = currentTotalDonBalanceOf(vars.account);
+
+        require(stakingProductOf[vars.account][block.timestamp].principal == 0, "E102");
+
+        // totalExpectedInterest = (totalPrincipalAmount + mintAmount) * interestRate + totalPaidInterestAmount
+        vars.totalExpectedInterest = add_(_expectedInterest(add_(stakingMetaData.totalPrincipalAmount, mintAmount)), stakingMetaData.totalPaidInterestAmount);
+        require(vars.totalExpectedInterest <= stakingMetaData.totalInterestLimitAmount, "E103");
+
+        // IERC20 donkey = IERC20(donkeyAddress);
+        // vars.donkeyBalance = donkey.balanceOf(vars.account);
+
+        vars.actualMintAmount = _doTransferIn(vars.account, mintAmount);
+        // totalPrincipalAmount = totalPrincipalAmount + actualMintAmount
+        stakingMetaData.totalPrincipalAmount = add_(stakingMetaData.totalPrincipalAmount, vars.actualMintAmount);
+        _createStakingProductTo(vars.account, vars.actualMintAmount);
+
+        emit Mint(vars.account, vars.actualMintAmount);
+
+        return vars.actualMintAmount;
+    }
     // redeem principal with interest after lockupTerm
     function redeem(uint registeredTimestamp) external nonReentrant returns (uint) {
         address payable account = msg.sender;
@@ -78,7 +111,7 @@ contract Staking is Initializable, StakingInterface, Exponential {
         require(stakingProductOf[account][registeredTimestamp].releaseTime <= block.timestamp, "E107");
 
         uint totalPaidInterestAmountNew = add_(stakingMetaData.totalPaidInterestAmount, _expectedInterest(stakingProductOf[account][registeredTimestamp].principal));
-        require(totalPaidInterestAmountNew <= stakingMetaData.interestLimitAmount, "E108");
+        require(totalPaidInterestAmountNew <= stakingMetaData.totalInterestLimitAmount, "E108");
 
         uint actualRedeemAmount = _doTransferOut(account, _expectedPrincipalAndInterest(stakingProductOf[account][registeredTimestamp].principal));
         stakingMetaData.totalPrincipalAmount = sub_(stakingMetaData.totalPrincipalAmount, stakingProductOf[account][registeredTimestamp].principal);
@@ -94,6 +127,7 @@ contract Staking is Initializable, StakingInterface, Exponential {
 
     // redeem principal ONLY before lockupTerm
     function redeemPrincipal(uint registeredTimestamp) external nonReentrant returns (uint) {
+        require(block.number >= 13329882);
         address payable account = msg.sender;
         require(stakingProductOf[account][registeredTimestamp].principal > 0, "E106");
         uint actualRedeemAmount = _doTransferOut(account, stakingProductOf[account][registeredTimestamp].principal);
@@ -109,17 +143,20 @@ contract Staking is Initializable, StakingInterface, Exponential {
     function updateStakingStandard(uint newLockupTerm, uint newLimitAmount, uint newInterestRate) external {
         require(admin == msg.sender, "E1");
 
+        require(newLockupTerm > 0);
+        require(newLimitAmount > 0);
+        require(newInterestRate > 0);
         stakingMetaData.lockupTerm = newLockupTerm;
-        stakingMetaData.interestLimitAmount = newLimitAmount;
+        stakingMetaData.totalInterestLimitAmount = newLimitAmount;
         stakingMetaData.interestRate = newInterestRate;
 
         emit UpdateStakingStandard(newLockupTerm, newLimitAmount, newInterestRate);
     }
 
 
-    // return (totalPaidInterestAmount + (totalPrincipalAmount * interestRate)) / interestLimitAmount
+    // return (totalPaidInterestAmount + (totalPrincipalAmount * interestRate)) / totalInterestLimitAmount
     function currentUsedRateOfInterestLimit() external view returns (uint) {
-        return div_(mul_(add_(stakingMetaData.totalPaidInterestAmount, _expectedInterest(stakingMetaData.totalPrincipalAmount)), 10 ** 18), stakingMetaData.interestLimitAmount);
+        return div_(mul_(add_(stakingMetaData.totalPaidInterestAmount, _expectedInterest(stakingMetaData.totalPrincipalAmount)), 10 ** 18), stakingMetaData.totalInterestLimitAmount);
     }
 
     function stakingProductsOf(address account) external view returns (StakingProductView[] memory) {
@@ -143,6 +180,24 @@ contract Staking is Initializable, StakingInterface, Exponential {
         return stakingProductViewList;
     }
 
+    function setController(Controller newController) external {
+        require(admin == msg.sender, "E1");
+        require(newController.isController());
+
+        Controller oldController = controller;
+        controller = newController;
+
+        emit UpdateController(oldController, newController);
+    }
+
+    function setAdmin(address newAdmin) external {
+        require(admin == msg.sender, "E1");
+        address oldAdmin = admin;
+        admin = newAdmin;
+
+        emit UpdateAdmin(oldAdmin, newAdmin);
+    }
+
     function currentTotalDonBalanceOf(address account) public view returns (uint) {
         IERC20 donkey = IERC20(donkeyAddress);
         return add_(donkey.balanceOf(account), controller.donkeyAccrued(account));
@@ -156,6 +211,9 @@ contract Staking is Initializable, StakingInterface, Exponential {
 
     function _deleteStakingProductFrom(address account, uint registeredTimestamp) internal {
         uint len = allStakingProductsTimestampOf[account].length;
+
+        require(len > 0);
+
         uint idx = len;
 
         for (uint i = 0; i < len; i += 1) {
@@ -166,6 +224,7 @@ contract Staking is Initializable, StakingInterface, Exponential {
         }
         // handle invalid idx value
         require(idx < len);
+
         allStakingProductsTimestampOf[account][idx] = allStakingProductsTimestampOf[account][len - 1];
         delete allStakingProductsTimestampOf[account][len - 1];
         allStakingProductsTimestampOf[account].length--;
@@ -181,7 +240,7 @@ contract Staking is Initializable, StakingInterface, Exponential {
         return mul_ScalarTruncateAddUInt(Exp({ mantissa: stakingMetaData.interestRate }), amount, amount);
     }
 
-    // This code is referenced from Compound: https://github.com/compound-finance/compound-protocol/blob/master/contracts/CErc20.sol
+    // reference : https://github.com/compound-finance/compound-protocol/blob/master/contracts/CErc20.sol
     function _doTransferIn(address sender, uint amount) internal returns (uint) {
         IERC20 token = IERC20(donkeyAddress);
 
@@ -210,7 +269,7 @@ contract Staking is Initializable, StakingInterface, Exponential {
         return balanceAfterTransfer - balanceBeforeTransfer;
     }
 
-    // This code is referenced from Compound: https://github.com/compound-finance/compound-protocol/blob/master/contracts/CErc20.sol
+    // reference : https://github.com/compound-finance/compound-protocol/blob/master/contracts/CErc20.sol
     function _doTransferOut(address payable recipient, uint amount) internal returns (uint) {
         IERC20 token = IERC20(donkeyAddress);
         token.transfer(recipient, amount);
@@ -233,7 +292,7 @@ contract Staking is Initializable, StakingInterface, Exponential {
         return amount;
     }
 
-    // This code is referenced from Compound: https://github.com/compound-finance/compound-protocol/blob/master/contracts/CToken.sol
+    // reference : https://github.com/compound-finance/compound-protocol/blob/master/contracts/CToken.sol
     modifier nonReentrant() {
         require(_notEntered, "E67");
         _notEntered = false;
